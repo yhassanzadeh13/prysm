@@ -80,18 +80,20 @@ func run(ctx context.Context, v iface.Validator) {
 			return // Exit if context is canceled.
 		case slot := <-v.NextSlot():
 			if !healthTracker.IsHealthy() {
+				span.End()
 				continue
 			}
 			span.AddAttributes(trace.Int64Attribute("slot", int64(slot))) // lint:ignore uintcast -- This conversion is OK for tracing.
 
 			deadline := v.SlotDeadline(slot)
 			slotCtx, cancel := context.WithDeadline(ctx, deadline)
+			defer cancel() // Ensure cancellation to avoid context leakage
 			log := log.WithField("slot", slot)
 			log.WithField("deadline", deadline).Debug("Set deadline for proposals and attestations")
 
 			// Keep trying to update assignments if they are nil or if we are past an
 			// epoch transition in the beacon node's state.
-			if err := v.UpdateDuties(ctx, slot); err != nil {
+			if err := v.UpdateDuties(slotCtx, slot); err != nil {
 				handleAssignmentError(err, slot)
 				cancel()
 				span.End()
@@ -117,7 +119,7 @@ func run(ctx context.Context, v iface.Validator) {
 
 			var wg sync.WaitGroup
 
-			allRoles, err := v.RolesAt(ctx, slot)
+			allRoles, err := v.RolesAt(slotCtx, slot)
 			if err != nil {
 				log.WithError(err).Error("Could not get validator roles")
 				cancel()
@@ -125,6 +127,8 @@ func run(ctx context.Context, v iface.Validator) {
 				continue
 			}
 			performRoles(slotCtx, allRoles, v, slot, &wg, span)
+			cancel() // Ensure that the derived context is cancelled
+			span.End()
 		case isHealthyAgain := <-healthTracker.HealthUpdates():
 			if isHealthyAgain {
 				headSlot, err = initializeValidatorAndGetHeadSlot(ctx, v)
